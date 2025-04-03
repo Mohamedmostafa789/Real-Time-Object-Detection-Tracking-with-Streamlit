@@ -1,4 +1,4 @@
-# **Project Name: Real-Time Object Detection & Tracking with Streamlit**  
+# ** Real-Time Object Detection & Tracking with Streamlit**  
 
 ## **Project Description**  
 
