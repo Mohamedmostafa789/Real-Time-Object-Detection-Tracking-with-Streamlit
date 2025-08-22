@@ -5,7 +5,7 @@ import threading
 import streamlit as st
 import seaborn as sns
 import matplotlib.pyplot as plt
-from ultralyrics import YOLO
+from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 import av
 
@@ -160,3 +160,4 @@ if ctx.state.playing:
         st.info("Start the video stream to generate a heatmap.")
 else:
     st.info("Start the video stream to generate a heatmap.")
+
