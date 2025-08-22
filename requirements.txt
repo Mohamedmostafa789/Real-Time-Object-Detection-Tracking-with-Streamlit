@@ -6,3 +6,4 @@ filterpy
 seaborn
 matplotlib
 streamlit-webrtc
+twilio  <-- ADD THIS LINE
