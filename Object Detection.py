@@ -9,12 +9,8 @@ from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 import av
 
-
-TWILIO_ACCOUNT_SID="ACbc3bfcdefdf3d7d25411e4750c708e9d"
-TWILIO_AUTH_TOKEN="5231f3780d956f09d470ea797f4f0113"
-
 # Import necessary components from streamlit-webrtc
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, get_twilio_ice_servers
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 
 # Set environment variable to prevent OpenMP conflicts with some libraries
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -90,33 +86,31 @@ detect_objects = st.checkbox("Enable Object Detection", value=True)
 with shared_state.lock:
     shared_state.detect_objects = detect_objects
 
-# Get Twilio ICE servers from Streamlit secrets
-try:
-    twilio_ice_servers = get_twilio_ice_servers(
-        os.environ["TWILIO_ACCOUNT_SID"],
-        os.environ["TWILIO_AUTH_TOKEN"]
-    )
-except KeyError:
-    st.warning("Twilio credentials not found. The app might not work on some networks. "
-               "Add them to your Streamlit secrets for a more reliable connection.")
-    twilio_ice_servers = []
-except Exception as e:
-    st.error(f"Error getting Twilio ICE servers: {e}")
-    twilio_ice_servers = []
+# Here, we define a list of public STUN servers
+# No API keys or secrets are needed for this method
+public_ice_servers = [
+    {"urls": ["stun:stun.l.google.com:19302"]},
+    {"urls": ["stun:stun1.l.google.com:19302"]},
+    {"urls": ["stun:stun2.l.google.com:19302"]},
+    {"urls": ["stun:stun3.l.google.com:19302"]},
+    {"urls": ["stun:stun4.l.google.com:19302"]},
+    {"urls": ["stun:stun.stunprotocol.org:3478"]},
+    {"urls": ["stun:stun.nextcloud.com:3478"]},
+]
 
-# Start the WebRTC streamer
+# Start the WebRTC streamer with the new STUN server list
 ctx = webrtc_streamer(
     key="live_detection",
     mode=WebRtcMode.SENDRECV,
     video_processor_factory=VideoProcessor,
     media_stream_constraints={"video": True, "audio": False},
-    rtc_configuration={"iceServers": twilio_ice_servers}
+    rtc_configuration={"iceServers": public_ice_servers}
 )
 
 
 # ========== Kalman Filter for Simulated Laser Tracking ==========
 st.title("Simulated Laser Tracking with Kalman Filter")
-
+# ... (rest of the Kalman Filter code is the same)
 np.random.seed(42)
 time_steps = 100
 true_distance = np.linspace(1, 10, time_steps)
@@ -150,13 +144,12 @@ st.pyplot(fig1)
 
 # ========== Heatmap of Object Movement ==========
 st.title("Heatmap of Object Movement")
-
+# ... (rest of the heatmap code is the same)
 if ctx.state.playing:
     with shared_state.lock:
         positions = shared_state.positions.copy()
     
     if positions:
-        # Note: The video resolution is typically 640x480 for webcams
         heatmap_size = (480, 640)
         heatmap_data = np.zeros(heatmap_size)
         
