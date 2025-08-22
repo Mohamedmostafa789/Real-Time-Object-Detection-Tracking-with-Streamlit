@@ -5,7 +5,7 @@ import threading
 import streamlit as st
 import seaborn as sns
 import matplotlib.pyplot as plt
-from ultralytics import YOLO
+from ultralyrics import YOLO
 from filterpy.kalman import KalmanFilter
 import av
 
@@ -20,7 +20,6 @@ cv2.setNumThreads(0)
 
 
 # Create the YOLO model outside of the class to load it only once
-# This is a major performance improvement
 try:
     yolo_model = YOLO("yolov8n.pt")
     yolo_names = yolo_model.names
@@ -49,12 +48,11 @@ class VideoProcessor(VideoProcessorBase):
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
 
-        # Get the latest state from the main thread
         with shared_state.lock:
             self.detect_enabled = shared_state.detect_objects
             
         if self.detect_enabled and yolo_model:
-            results = yolo_model(image, verbose=False) # verbose=False to prevent log spam
+            results = yolo_model(image, verbose=False)
             
             for result in results:
                 for box in result.boxes:
@@ -66,13 +64,11 @@ class VideoProcessor(VideoProcessorBase):
                     cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                     
-                    # Store detected position (center of bounding box)
                     self.positions.append(((x1 + x2) // 2, (y1 + y2) // 2))
 
-        # Send the updated positions back to the main thread
         with shared_state.lock:
             shared_state.positions.extend(self.positions)
-            self.positions = [] # Clear for the next loop
+            self.positions = []
 
         return av.VideoFrame.from_ndarray(image, format="bgr24")
 
@@ -81,7 +77,6 @@ class VideoProcessor(VideoProcessorBase):
 st.title("Live Object Detection & Kalman Filter Tracking")
 st.markdown("---")
 
-# Use a checkbox in the main UI to control detection
 detect_objects = st.checkbox("Enable Object Detection", value=True)
 with shared_state.lock:
     shared_state.detect_objects = detect_objects
@@ -110,7 +105,7 @@ ctx = webrtc_streamer(
 
 # ========== Kalman Filter for Simulated Laser Tracking ==========
 st.title("Simulated Laser Tracking with Kalman Filter")
-# ... (rest of the Kalman Filter code is the same)
+
 np.random.seed(42)
 time_steps = 100
 true_distance = np.linspace(1, 10, time_steps)
@@ -144,7 +139,7 @@ st.pyplot(fig1)
 
 # ========== Heatmap of Object Movement ==========
 st.title("Heatmap of Object Movement")
-# ... (rest of the heatmap code is the same)
+
 if ctx.state.playing:
     with shared_state.lock:
         positions = shared_state.positions.copy()
