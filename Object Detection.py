@@ -40,7 +40,7 @@ class VideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.positions = []
         self.detect_enabled = True
-        self.frame_skip = 3  # Detect objects on every 3rd frame
+        self.frame_skip = 2  # Detect objects on every 3rd frame
         self.frame_count = 0
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
@@ -154,4 +154,5 @@ if ctx.state.playing:
         st.info("Start the video stream to generate a heatmap.")
 else:
     st.info("Start the video stream to generate a heatmap.")
+
 
