@@ -9,6 +9,10 @@ from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 import av
 
+
+TWILIO_ACCOUNT_SID="ACbc3bfcdefdf3d7d25411e4750c708e9d"
+TWILIO_AUTH_TOKEN="5231f3780d956f09d470ea797f4f0113"
+
 # Import necessary components from streamlit-webrtc
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, get_twilio_ice_servers
 
