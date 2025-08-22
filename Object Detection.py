@@ -1,6 +1,4 @@
 import os
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE" # Prevent OpenMP conflicts
-
 import cv2
 import numpy as np
 import threading
@@ -9,36 +7,44 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
-
-# We need these new imports for webrtc
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
 
+# Import necessary components from streamlit-webrtc
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, get_twilio_ice_servers
 
-# A note on thread safety:
-# Streamlit widgets (st.checkbox, st.title, etc.) cannot be used inside the video processor class.
-# We will use instance variables and a lock to handle communication between threads.
+# Set environment variable to prevent OpenMP conflicts with some libraries
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# Disable OpenMP conflicts in OpenCV
+cv2.setNumThreads(0)
+
 
 # Create the YOLO model outside of the class to load it only once
 # This is a major performance improvement
-yolo_model = YOLO("yolov8n.pt")
-yolo_names = yolo_model.names
+try:
+    yolo_model = YOLO("yolov8n.pt")
+    yolo_names = yolo_model.names
+except Exception as e:
+    st.error(f"Could not load YOLO model: {e}")
+    yolo_model = None
+    yolo_names = []
+
 
 # A simple class to share data between the main Streamlit thread and the video processing thread
 class SharedState:
     def __init__(self):
-        self.detect_objects = False
+        self.detect_objects = True
         self.positions = []
         self.lock = threading.Lock()
 
 shared_state = SharedState()
 
+
 # The video processor class that will run on a separate thread
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
-        self.lock = threading.Lock()
         self.positions = []
-        self.detect_enabled = False
+        self.detect_enabled = True
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
@@ -47,7 +53,7 @@ class VideoProcessor(VideoProcessorBase):
         with shared_state.lock:
             self.detect_enabled = shared_state.detect_objects
             
-        if self.detect_enabled:
+        if self.detect_enabled and yolo_model:
             results = yolo_model(image, verbose=False) # verbose=False to prevent log spam
             
             for result in results:
@@ -61,8 +67,7 @@ class VideoProcessor(VideoProcessorBase):
                     cv2.putText(image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                     
                     # Store detected position (center of bounding box)
-                    with self.lock:
-                        self.positions.append(((x1 + x2) // 2, (y1 + y2) // 2))
+                    self.positions.append(((x1 + x2) // 2, (y1 + y2) // 2))
 
         # Send the updated positions back to the main thread
         with shared_state.lock:
@@ -81,18 +86,33 @@ detect_objects = st.checkbox("Enable Object Detection", value=True)
 with shared_state.lock:
     shared_state.detect_objects = detect_objects
 
+# Get Twilio ICE servers from Streamlit secrets
+try:
+    twilio_ice_servers = get_twilio_ice_servers(
+        os.environ["TWILIO_ACCOUNT_SID"],
+        os.environ["TWILIO_AUTH_TOKEN"]
+    )
+except KeyError:
+    st.warning("Twilio credentials not found. The app might not work on some networks. "
+               "Add them to your Streamlit secrets for a more reliable connection.")
+    twilio_ice_servers = []
+except Exception as e:
+    st.error(f"Error getting Twilio ICE servers: {e}")
+    twilio_ice_servers = []
+
 # Start the WebRTC streamer
 ctx = webrtc_streamer(
-    key="example",
+    key="live_detection",
     mode=WebRtcMode.SENDRECV,
     video_processor_factory=VideoProcessor,
     media_stream_constraints={"video": True, "audio": False},
+    rtc_configuration={"iceServers": twilio_ice_servers}
 )
 
 
 # ========== Kalman Filter for Simulated Laser Tracking ==========
 st.title("Simulated Laser Tracking with Kalman Filter")
-# (The rest of your code for Kalman Filter remains unchanged)
+
 np.random.seed(42)
 time_steps = 100
 true_distance = np.linspace(1, 10, time_steps)
@@ -127,13 +147,12 @@ st.pyplot(fig1)
 # ========== Heatmap of Object Movement ==========
 st.title("Heatmap of Object Movement")
 
-# We can only access the positions after the stream is active
 if ctx.state.playing:
     with shared_state.lock:
         positions = shared_state.positions.copy()
     
     if positions:
-        # Note: The video resolution is typically 640x480
+        # Note: The video resolution is typically 640x480 for webcams
         heatmap_size = (480, 640)
         heatmap_data = np.zeros(heatmap_size)
         
@@ -145,3 +164,7 @@ if ctx.state.playing:
         sns.heatmap(heatmap_data, cmap="hot", cbar=True, xticklabels=False, yticklabels=False)
         ax2.set_title("Object Movement Heatmap")
         st.pyplot(fig2)
+    else:
+        st.info("Start the video stream to generate a heatmap.")
+else:
+    st.info("Start the video stream to generate a heatmap.")
