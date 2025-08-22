@@ -35,29 +35,45 @@ class SharedState:
 
 shared_state = SharedState()
 
+# The video processor class that will run on a separate thread
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.positions = []
         self.detect_enabled = True
+        self.frame_skip = 3  # Detect objects on every 3rd frame
+        self.frame_count = 0
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
+        
+        # Get the latest state from the main thread
         with shared_state.lock:
             self.detect_enabled = shared_state.detect_objects
-        if self.detect_enabled and yolo_model:
-            results = yolo_model(image, verbose=False)
+        
+        # This is where the change happens
+        if self.detect_enabled and yolo_model and self.frame_count % self.frame_skip == 0:
+            results = yolo_model(image, verbose=False) # verbose=False to prevent log spam
+            
             for result in results:
                 for box in result.boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     conf = box.conf[0].item()
                     cls = int(box.cls[0].item())
                     label = f"{yolo_names[cls]} ({conf:.2f})"
+                    
                     cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                    
+                    # Store detected position (center of bounding box)
                     self.positions.append(((x1 + x2) // 2, (y1 + y2) // 2))
-        with shared_state.lock:
-            shared_state.positions.extend(self.positions)
-            self.positions = []
+
+            # Send the updated positions back to the main thread
+            with shared_state.lock:
+                shared_state.positions.extend(self.positions)
+                self.positions = [] # Clear for the next loop
+        
+        self.frame_count += 1
+
         return av.VideoFrame.from_ndarray(image, format="bgr24")
 
 # ========== Streamlit UI ==========
@@ -138,3 +154,4 @@ if ctx.state.playing:
         st.info("Start the video stream to generate a heatmap.")
 else:
     st.info("Start the video stream to generate a heatmap.")
+
