@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 import av
+import queue  # <-- CORRECT: Import the queue module
 
 # Import necessary components from streamlit-webrtc
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, get_twilio_ice_servers
@@ -74,7 +75,7 @@ class DetectEnabledState:
 
 detect_enabled_state = DetectEnabledState()
 detection_results = DetectionResults()
-frame_queue = av.Queue()
+frame_queue = queue.Queue(maxsize=1)  # <-- CORRECT: Use queue.Queue() and limit size
 
 detection_thread = threading.Thread(target=detection_worker, args=(detection_results, frame_queue, detect_enabled_state), daemon=True)
 detection_thread.start()
@@ -86,8 +87,12 @@ class VideoProcessor(VideoProcessorBase):
         image = frame.to_ndarray(format="bgr24")
 
         # Put the current frame in the queue for the worker
-        if not frame_queue.full():
-            frame_queue.put(image.copy())
+        # Use put_nowait to avoid blocking if the queue is full
+        try:
+            frame_queue.put_nowait(image.copy())
+        except queue.Full:
+            # If the queue is full, the worker is still busy, so we skip this frame
+            pass
 
         # Draw the latest results from the worker thread
         with detection_results.lock:
