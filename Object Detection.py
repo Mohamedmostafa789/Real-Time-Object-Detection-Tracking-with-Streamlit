@@ -9,7 +9,7 @@ from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 import av
 import queue
-import time # <-- Add this import
+import collections # <-- ADD THIS IMPORT
 
 # Import necessary components from streamlit-webrtc
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, get_twilio_ice_servers
@@ -139,13 +139,12 @@ ctx = webrtc_streamer(
 )
 
 # A place to store all the positions for the heatmap
-# This will be stored in the session state
+# Use a deque to limit the size of the collected data for performance
 if 'heatmap_positions' not in st.session_state:
-    st.session_state.heatmap_positions = []
+    st.session_state.heatmap_positions = collections.deque(maxlen=1000) # Keep last 1000 positions
 
 # When the stream is active, collect the positions
 if ctx.state.playing:
-    # A simple, non-blocking way to collect data
     with st.session_state.detection_results.lock:
         for box in st.session_state.detection_results.boxes:
             st.session_state.heatmap_positions.append(box['pos'])
@@ -182,10 +181,12 @@ st.pyplot(fig1)
 
 # ========== Heatmap of Object Movement ==========
 st.title("Heatmap of Object Movement")
-if st.session_state.heatmap_positions:
+# Convert deque to a list for plotting
+heatmap_data_list = list(st.session_state.heatmap_positions)
+if heatmap_data_list:
     heatmap_size = (480, 640)
     heatmap_data = np.zeros(heatmap_size)
-    for x, y in st.session_state.heatmap_positions:
+    for x, y in heatmap_data_list:
         if 0 <= y < heatmap_size[0] and 0 <= x < heatmap_size[1]:
             heatmap_data[y, x] += 1
     fig2, ax2 = plt.subplots(figsize=(8, 6))
