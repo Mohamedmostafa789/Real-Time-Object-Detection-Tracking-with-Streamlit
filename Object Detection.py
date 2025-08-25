@@ -8,8 +8,7 @@ import matplotlib.pyplot as plt
 from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 import av
-import queue
-import collections # <-- ADD THIS IMPORT
+import queue  # <-- CORRECT: Import the queue module
 
 # Import necessary components from streamlit-webrtc
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, get_twilio_ice_servers
@@ -74,17 +73,13 @@ class DetectEnabledState:
         self.value = True
         self.lock = threading.Lock()
 
-# Initialize the state and objects once only
-if 'detection_results' not in st.session_state:
-    st.session_state.detection_results = DetectionResults()
-    st.session_state.detect_enabled_state = DetectEnabledState()
-    st.session_state.frame_queue = queue.Queue(maxsize=1)
-    st.session_state.detection_thread = threading.Thread(
-        target=detection_worker, 
-        args=(st.session_state.detection_results, st.session_state.frame_queue, st.session_state.detect_enabled_state), 
-        daemon=True
-    )
-    st.session_state.detection_thread.start()
+detect_enabled_state = DetectEnabledState()
+detection_results = DetectionResults()
+frame_queue = queue.Queue(maxsize=1)  # <-- CORRECT: Use queue.Queue() and limit size
+
+detection_thread = threading.Thread(target=detection_worker, args=(detection_results, frame_queue, detect_enabled_state), daemon=True)
+detection_thread.start()
+
 
 # The video processor class that runs in the main thread
 class VideoProcessor(VideoProcessorBase):
@@ -92,14 +87,16 @@ class VideoProcessor(VideoProcessorBase):
         image = frame.to_ndarray(format="bgr24")
 
         # Put the current frame in the queue for the worker
+        # Use put_nowait to avoid blocking if the queue is full
         try:
-            st.session_state.frame_queue.put_nowait(image.copy())
+            frame_queue.put_nowait(image.copy())
         except queue.Full:
+            # If the queue is full, the worker is still busy, so we skip this frame
             pass
 
         # Draw the latest results from the worker thread
-        with st.session_state.detection_results.lock:
-            for box in st.session_state.detection_results.boxes:
+        with detection_results.lock:
+            for box in detection_results.boxes:
                 x1, y1, x2, y2 = box['coords']
                 label = box['label']
                 cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -113,8 +110,8 @@ st.title("Live Object Detection & Kalman Filter Tracking")
 st.markdown("---")
 
 detect_objects = st.checkbox("Enable Object Detection", value=True)
-with st.session_state.detect_enabled_state.lock:
-    st.session_state.detect_enabled_state.value = detect_objects
+with detect_enabled_state.lock:
+    detect_enabled_state.value = detect_objects
 
 # Get Twilio ICE servers from Streamlit secrets
 try:
@@ -139,15 +136,18 @@ ctx = webrtc_streamer(
 )
 
 # A place to store all the positions for the heatmap
-# Use a deque to limit the size of the collected data for performance
-if 'heatmap_positions' not in st.session_state:
-    st.session_state.heatmap_positions = collections.deque(maxlen=1000) # Keep last 1000 positions
+heatmap_positions = []
 
 # When the stream is active, collect the positions
 if ctx.state.playing:
-    with st.session_state.detection_results.lock:
-        for box in st.session_state.detection_results.boxes:
-            st.session_state.heatmap_positions.append(box['pos'])
+    # This loop runs continuously to collect data from the detection worker
+    while True:
+        with detection_results.lock:
+            for box in detection_results.boxes:
+                heatmap_positions.append(box['pos'])
+        
+        # This will prevent the loop from blocking
+        plt.pause(0.1)
 
 # ========== Kalman Filter for Simulated Laser Tracking ==========
 st.title("Simulated Laser Tracking with Kalman Filter")
@@ -181,12 +181,10 @@ st.pyplot(fig1)
 
 # ========== Heatmap of Object Movement ==========
 st.title("Heatmap of Object Movement")
-# Convert deque to a list for plotting
-heatmap_data_list = list(st.session_state.heatmap_positions)
-if heatmap_data_list:
+if heatmap_positions:
     heatmap_size = (480, 640)
     heatmap_data = np.zeros(heatmap_size)
-    for x, y in heatmap_data_list:
+    for x, y in heatmap_positions:
         if 0 <= y < heatmap_size[0] and 0 <= x < heatmap_size[1]:
             heatmap_data[y, x] += 1
     fig2, ax2 = plt.subplots(figsize=(8, 6))
