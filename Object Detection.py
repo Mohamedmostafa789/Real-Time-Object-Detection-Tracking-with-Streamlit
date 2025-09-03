@@ -9,17 +9,19 @@ from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 import av
 import queue
+import time
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, get_twilio_ice_servers
 from scipy.optimize import linear_sum_assignment
 
-# Set environment variable to prevent OpenMP conflicts with some libraries
+# --- Environment Setup ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 cv2.setNumThreads(0)
 
-# --- Global State Management (Thread-safe) ---
+# --- Thread-safe Global State ---
 class DetectionResults:
     def __init__(self):
         self.boxes = []
+        self.latency = 0
         self.lock = threading.Lock()
 
 class DetectEnabledState:
@@ -27,7 +29,7 @@ class DetectEnabledState:
         self.value = value
         self.lock = threading.Lock()
 
-# --- Model Loading (Once at start) ---
+# --- Model Loading (Cached) ---
 @st.cache_resource
 def load_yolo_model(model_name):
     try:
@@ -39,38 +41,37 @@ def load_yolo_model(model_name):
 
 # --- Object Tracking with Kalman Filter ---
 class ObjectTracker:
+    # (The ObjectTracker class remains the same as in the previous professional code)
+    # I've omitted it here for brevity, but you should copy it directly
     def __init__(self):
         self.tracks = {}
         self.next_id = 0
         self.iou_threshold = 0.5
 
     def create_kalman_filter(self, bbox_center):
-        """Initializes a Kalman Filter for a new track."""
         kf = KalmanFilter(dim_x=4, dim_z=2)
-        kf.x = np.array([bbox_center[0], bbox_center[1], 0, 0]) # State: [x, y, vx, vy]
-        kf.F = np.array([[1, 0, 1, 0],
-                         [0, 1, 0, 1],
-                         [0, 0, 1, 0],
-                         [0, 0, 0, 1]]) # State Transition Matrix
-        kf.H = np.array([[1, 0, 0, 0],
-                         [0, 1, 0, 0]]) # Measurement Function
-        kf.P = np.eye(4) * 1000 # Covariance Matrix
-        kf.R = np.eye(2) * 1 # Measurement Noise
-        kf.Q = np.eye(4) * 0.1 # Process Noise
+        kf.x = np.array([bbox_center[0], bbox_center[1], 0, 0])
+        kf.F = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]])
+        kf.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
+        kf.P = np.eye(4) * 1000
+        kf.R = np.eye(2) * 1
+        kf.Q = np.eye(4) * 0.1
         return kf
 
     def track_and_update(self, new_detections):
-        """Updates tracks with new detections using Hungarian algorithm (Munkres)."""
-        # Predict all existing tracks
+        # ... (rest of the tracking logic)
+        # This part of the code is unchanged from the previous answer
+        if not new_detections and not self.tracks:
+            return self.tracks
+
         for track_id in list(self.tracks.keys()):
             self.tracks[track_id]['kf'].predict()
             self.tracks[track_id]['bbox_pred'] = self._get_bbox_from_state(self.tracks[track_id]['kf'].x)
-
+        
         if not new_detections:
             return self.tracks
 
         if not self.tracks:
-            # First frame, create new tracks for all detections
             for det in new_detections:
                 self.tracks[self.next_id] = {
                     'kf': self.create_kalman_filter(det['pos']),
@@ -81,27 +82,23 @@ class ObjectTracker:
                 }
                 self.next_id += 1
             return self.tracks
-
-        # Build cost matrix based on IOU between predicted tracks and new detections
+        
         cost_matrix = np.full((len(self.tracks), len(new_detections)), 1.0)
         track_ids = list(self.tracks.keys())
         for i, track_id in enumerate(track_ids):
             for j, det in enumerate(new_detections):
                 cost_matrix[i, j] = 1 - self._calculate_iou(self.tracks[track_id]['bbox_pred'], det['coords'])
-
-        # Solve assignment problem
+        
         row_ind, col_ind = linear_sum_assignment(cost_matrix)
 
-        # Update matched tracks
         for track_idx, det_idx in zip(row_ind, col_ind):
             if cost_matrix[track_idx, det_idx] < (1 - self.iou_threshold):
                 track_id = track_ids[track_idx]
                 det = new_detections[det_idx]
                 self.tracks[track_id]['kf'].update(np.array(det['pos']))
                 self.tracks[track_id]['bbox_true'] = det['coords']
-                self.tracks[track_id]['label'] = det['label'] # Update label in case of class change
+                self.tracks[track_id]['label'] = det['label']
 
-        # Create new tracks for unmatched detections
         unmatched_detections = set(range(len(new_detections))) - set(col_ind)
         for det_idx in unmatched_detections:
             det = new_detections[det_idx]
@@ -131,18 +128,20 @@ class ObjectTracker:
 
     def _get_bbox_from_state(self, state):
         x, y, _, _ = state
-        return [int(x - 25), int(y - 25), int(x + 25), int(y + 25)] # Placeholder for predicted box
+        return [int(x - 25), int(y - 25), int(x + 25), int(y + 25)]
 
-# --- The Worker Thread ---
+# --- The Worker Thread (Optimized) ---
 def detection_worker(detection_results, frame_queue, detect_enabled_state, yolo_model_ref):
     yolo_model = yolo_model_ref[0]
     yolo_names = yolo_model_ref[1]
     
     while True:
-        frame = frame_queue.get()
-        if frame is None:
+        frame_data = frame_queue.get()
+        if frame_data is None:
             break
 
+        frame, start_time = frame_data
+        
         with detect_enabled_state.lock:
             if not detect_enabled_state.value:
                 detection_results.boxes = []
@@ -163,8 +162,11 @@ def detection_worker(detection_results, frame_queue, detect_enabled_state, yolo_
                         'pos': ((x1 + x2) // 2, (y1 + y2) // 2),
                         'conf': conf
                     })
+            
+            latency = (time.time() - start_time) * 1000  # Latency in milliseconds
             with detection_results.lock:
                 detection_results.boxes = new_boxes
+                detection_results.latency = latency
 
 # --- Video Processor Class ---
 class VideoProcessor(VideoProcessorBase):
@@ -173,33 +175,36 @@ class VideoProcessor(VideoProcessorBase):
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
+        
+        # PRO-TIP: Resize the frame before sending it to the model to reduce latency
+        # This is the single biggest performance improvement you can make on a CPU
+        resized_image = cv2.resize(image, (640, 480)) # Example resize, you can customize
 
         try:
-            frame_queue.put_nowait(image.copy())
+            # We also pass the timestamp to calculate latency
+            frame_queue.put_nowait((resized_image.copy(), time.time()))
         except queue.Full:
             pass
-
+        
         with detection_results.lock:
             latest_detections = detection_results.boxes
+            latency = detection_results.latency
 
-        # --- Professional Tracking step ---
-        # The tracker now links detections across frames
         tracked_objects = self.object_tracker.track_and_update(latest_detections)
 
-        # --- Drawing Phase ---
+        # Draw the latency on the frame
+        cv2.putText(image, f"Latency: {latency:.2f} ms", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        
+        # Drawing phase (rest of the code is the same)
         for track_id, track in tracked_objects.items():
-            # Use the tracked object's properties for drawing
             x1, y1, x2, y2 = track['bbox_true']
             label = track['label']
             
-            # Use a unique color for each tracked ID
             color = tuple(int(c) for c in (sns.color_palette("husl", 10)[track_id % 10] * 255))
             
-            # Draw the box and ID
             cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
             cv2.putText(image, f"ID {track['id']}: {label}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             
-            # Store the Kalman-filtered position for the heatmap
             heatmap_positions.append(track['pos'])
 
         return av.VideoFrame.from_ndarray(image, format="bgr24")
@@ -208,7 +213,6 @@ class VideoProcessor(VideoProcessorBase):
 st.title("Professional Object Detection & Tracking")
 st.markdown("---")
 
-# User model selection
 model_selection = st.radio(
     "Select a YOLO model for detection:",
     ('yolov8n.pt', 'yolov8s.pt', 'yolov8m.pt'),
@@ -222,12 +226,10 @@ if 'yolo_model' not in st.session_state or st.session_state.yolo_model_name != m
 if not st.session_state.yolo_model:
     st.stop()
 
-# Thread-safe objects
 detect_enabled_state = DetectEnabledState(True)
 detection_results = DetectionResults()
 frame_queue = queue.Queue(maxsize=1)
 
-# Start the worker thread
 detection_thread = threading.Thread(
     target=detection_worker,
     args=(detection_results, frame_queue, detect_enabled_state, (st.session_state.yolo_model, st.session_state.yolo_names)),
@@ -241,41 +243,31 @@ with detect_enabled_state.lock:
     detect_enabled_state.value = detect_objects
 
 try:
-    twilio_ice_servers = get_twilio_ice_servers(
-        st.secrets["twilio"]["account_sid"],
-        st.secrets["twilio"]["auth_token"]
-    )
+    twilio_ice_servers = get_twilio_ice_servers(st.secrets["twilio"]["account_sid"], st.secrets["twilio"]["auth_token"])
 except KeyError:
-    st.warning("Twilio credentials not found. The app might not work on some networks. "
-               "Add them to your Streamlit secrets for a more reliable connection.")
+    st.warning("Twilio credentials not found. The app might not work on some networks.")
     twilio_ice_servers = []
 except Exception as e:
     st.error(f"Error getting Twilio ICE servers: {e}")
     twilio_ice_servers = []
 
 ctx = webrtc_streamer(
-    key="live_detection_pro",
+    key="live_detection_pro_v2",
     mode=WebRtcMode.SENDRECV,
     video_processor_factory=VideoProcessor,
     media_stream_constraints={"video": True, "audio": False},
     rtc_configuration={"iceServers": twilio_ice_servers},
-    async_processing=True # Use async processing for better performance
+    async_processing=True
 )
 
-# A place to store all the positions for the heatmap
 heatmap_positions = []
 
-# Heatmap Section (Refined to only collect data when stream is active)
 st.title("Heatmap of Object Movement")
 st.markdown("This heatmap shows the accumulated path of tracked objects.")
-
 if ctx.state.playing:
-    # A cleaner way to collect data without a blocking loop
     st.info("The heatmap will be generated after the video stream is stopped.")
-    # The data collection now happens directly in the VideoProcessor.recv method.
 else:
     if heatmap_positions:
-        # Generate the heatmap only when the stream stops and data has been collected
         heatmap_size = (480, 640)
         heatmap_data = np.zeros(heatmap_size)
         for x, y in heatmap_positions:
@@ -289,7 +281,7 @@ else:
     else:
         st.info("Start the video stream to generate a heatmap.")
 
-# Existing Kalman Filter Simulation (kept for demonstration)
+# Kalman Filter Simulation
 st.title("Simulated Laser Tracking with Kalman Filter")
 # ... (your original Kalman filter code remains here, unchanged)
 np.random.seed(42)
