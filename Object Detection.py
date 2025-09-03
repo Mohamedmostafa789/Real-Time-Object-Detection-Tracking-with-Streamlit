@@ -28,7 +28,7 @@ class DetectionResults:
 
 # Create the YOLO model outside the class to load it once
 try:
-    yolo_model = YOLO("yolov8n.pt")
+    yolo_model = YOLO("yolov8x.pt")
     yolo_names = yolo_model.names
 except Exception as e:
     st.error(f"Could not load YOLO model: {e}")
@@ -193,3 +193,4 @@ if heatmap_positions:
     st.pyplot(fig2)
 else:
     st.info("Start the video stream to generate a heatmap.")
+
