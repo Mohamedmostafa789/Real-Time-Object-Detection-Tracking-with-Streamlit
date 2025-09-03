@@ -30,15 +30,32 @@ class DetectEnabledState:
         self.lock = threading.Lock()
 
 # --- Model Loading (Cached) ---
+# Updated @st.cache_resource function
 @st.cache_resource
 def load_yolo_model(model_name):
     try:
+        # Check for GPU availability
+        import torch
+        if torch.cuda.is_available():
+            device = 'cuda'
+            st.success("GPU is available and will be used for inference!")
+        else:
+            device = 'cpu'
+            st.warning("No GPU detected. Falling back to CPU, which may be slow.")
+        
         yolo_model = YOLO(model_name)
+        # Set the device for the model
+        yolo_model.to(device) 
+        
         return yolo_model, yolo_model.names
     except Exception as e:
         st.error(f"Could not load YOLO model {model_name}: {e}")
         return None, []
 
+# In the main part of your code, you can also add this line for good measure
+if st.session_state.yolo_model:
+    if torch.cuda.is_available():
+        st.session_state.yolo_model.to('cuda')
 # --- Object Tracking with Kalman Filter ---
 class ObjectTracker:
     # (The ObjectTracker class remains the same as in the previous professional code)
@@ -310,3 +327,4 @@ ax1.set_ylabel("Distance (m)")
 ax1.legend()
 ax1.set_title("Simulated Laser Tracking with Kalman Filter")
 st.pyplot(fig1)
+
