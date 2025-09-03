@@ -8,9 +8,9 @@ import matplotlib.pyplot as plt
 from ultralytics import YOLO
 from filterpy.kalman import KalmanFilter
 import av
-import queue
-import torch
-import time
+import queue  # <-- CORRECT: Import the queue module
+
+# Import necessary components from streamlit-webrtc
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, get_twilio_ice_servers
 
 # Set environment variable to prevent OpenMP conflicts with some libraries
@@ -19,34 +19,25 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # Disable OpenMP conflicts in OpenCV
 cv2.setNumThreads(0)
 
-# --- Thread-safe Global State ---
+
+# A class to hold the latest detection results
 class DetectionResults:
     def __init__(self):
         self.boxes = []
         self.lock = threading.Lock()
 
-class DetectEnabledState:
-    def __init__(self, value=True):
-        self.value = value
-        self.lock = threading.Lock()
+# Create the YOLO model outside the class to load it once
+try:
+    yolo_model = YOLO("yolov8n.pt")
+    yolo_names = yolo_model.names
+except Exception as e:
+    st.error(f"Could not load YOLO model: {e}")
+    yolo_model = None
+    yolo_names = []
 
-# --- Model Loading (Cached) ---
-@st.cache_resource
-def load_yolo_model(model_name):
-    """Loads a YOLO model and sets it to the GPU if available."""
-    try:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        st.success(f"YOLO model will use {device.upper()}.")
-        yolo_model = YOLO(model_name)
-        yolo_model.to(device)
-        return yolo_model, yolo_model.names
-    except Exception as e:
-        st.error(f"Could not load YOLO model {model_name}: {e}")
-        return None, []
 
-# --- The Worker Thread ---
-def detection_worker(detection_results, frame_queue, detect_enabled_state, yolo_model_ref):
-    yolo_model, yolo_names = yolo_model_ref
+# The worker that does the heavy lifting in a separate thread
+def detection_worker(detection_results, frame_queue, detect_enabled_state):
     while True:
         frame = frame_queue.get()
         if frame is None:
@@ -71,33 +62,41 @@ def detection_worker(detection_results, frame_queue, detect_enabled_state, yolo_
                         'label': label,
                         'pos': ((x1 + x2) // 2, (y1 + y2) // 2)
                     })
-            
+
             with detection_results.lock:
                 detection_results.boxes = new_boxes
+            
 
-# --- The video processor class that runs in the main thread ---
-class VideoProcessor(VideoProcessorBase):
+# A class to share a simple boolean value
+class DetectEnabledState:
     def __init__(self):
-        # A place to store all the positions for the heatmap, tied to the processor instance
-        self.heatmap_positions = []
+        self.value = True
+        self.lock = threading.Lock()
 
+detect_enabled_state = DetectEnabledState()
+detection_results = DetectionResults()
+frame_queue = queue.Queue(maxsize=1)  # <-- CORRECT: Use queue.Queue() and limit size
+
+detection_thread = threading.Thread(target=detection_worker, args=(detection_results, frame_queue, detect_enabled_state), daemon=True)
+detection_thread.start()
+
+
+# The video processor class that runs in the main thread
+class VideoProcessor(VideoProcessorBase):
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
 
+        # Put the current frame in the queue for the worker
+        # Use put_nowait to avoid blocking if the queue is full
         try:
             frame_queue.put_nowait(image.copy())
         except queue.Full:
+            # If the queue is full, the worker is still busy, so we skip this frame
             pass
-
-        with detection_results.lock:
-            latest_boxes = detection_results.boxes
-            # Collect data for the heatmap from the current frame's detections
-            for box in latest_boxes:
-                self.heatmap_positions.append(box['pos'])
 
         # Draw the latest results from the worker thread
         with detection_results.lock:
-            for box in latest_boxes:
+            for box in detection_results.boxes:
                 x1, y1, x2, y2 = box['coords']
                 label = box['label']
                 cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
@@ -105,7 +104,8 @@ class VideoProcessor(VideoProcessorBase):
         
         return av.VideoFrame.from_ndarray(image, format="bgr24")
 
-# --- Streamlit UI and Logic ---
+
+# ========== Streamlit UI ==========
 st.title("Live Object Detection & Kalman Filter Tracking")
 st.markdown("---")
 
@@ -113,27 +113,10 @@ detect_objects = st.checkbox("Enable Object Detection", value=True)
 with detect_enabled_state.lock:
     detect_enabled_state.value = detect_objects
 
-# Load the model only once
-yolo_model, yolo_names = load_yolo_model("yolov8n.pt")
-if not yolo_model:
-    st.stop()
-
-detect_enabled_state = DetectEnabledState()
-detection_results = DetectionResults()
-frame_queue = queue.Queue(maxsize=1)
-
-detection_thread = threading.Thread(
-    target=detection_worker, 
-    args=(detection_results, frame_queue, detect_enabled_state, (yolo_model, yolo_names)), 
-    daemon=True
-)
-if not detection_thread.is_alive():
-    detection_thread.start()
-
 # Get Twilio ICE servers from Streamlit secrets
 try:
     twilio_ice_servers = get_twilio_ice_servers(
-        st.secrets["twilio"]["account_sid"], 
+        st.secrets["twilio"]["account_sid"],
         st.secrets["twilio"]["auth_token"]
     )
 except KeyError:
@@ -149,21 +132,22 @@ ctx = webrtc_streamer(
     mode=WebRtcMode.SENDRECV,
     video_processor_factory=VideoProcessor,
     media_stream_constraints={"video": True, "audio": False},
-    rtc_configuration={"iceServers": twilio_ice_servers},
-    async_processing=True # Use async processing for better performance
+    rtc_configuration={"iceServers": twilio_ice_servers}
 )
 
-# Store heatmap positions in session state for persistence
-if "heatmap_positions" not in st.session_state:
-    st.session_state.heatmap_positions = []
+# A place to store all the positions for the heatmap
+heatmap_positions = []
 
-if ctx.state.playing and ctx.video_processor:
-    # A cleaner way to collect data without a blocking loop
-    # We now collect the data directly in the VideoProcessor.recv method
-    st.info("The heatmap will be generated after the video stream is stopped.")
-    # Append the positions from the video processor to the session state
-    st.session_state.heatmap_positions.extend(ctx.video_processor.heatmap_positions)
-    ctx.video_processor.heatmap_positions = [] # Clear the processor's list to avoid re-adding
+# When the stream is active, collect the positions
+if ctx.state.playing:
+    # This loop runs continuously to collect data from the detection worker
+    while True:
+        with detection_results.lock:
+            for box in detection_results.boxes:
+                heatmap_positions.append(box['pos'])
+        
+        # This will prevent the loop from blocking
+        plt.pause(0.1)
 
 # ========== Kalman Filter for Simulated Laser Tracking ==========
 st.title("Simulated Laser Tracking with Kalman Filter")
@@ -197,13 +181,12 @@ st.pyplot(fig1)
 
 # ========== Heatmap of Object Movement ==========
 st.title("Heatmap of Object Movement")
-if st.session_state.heatmap_positions:
+if heatmap_positions:
     heatmap_size = (480, 640)
     heatmap_data = np.zeros(heatmap_size)
-    for x, y in st.session_state.heatmap_positions:
+    for x, y in heatmap_positions:
         if 0 <= y < heatmap_size[0] and 0 <= x < heatmap_size[1]:
             heatmap_data[y, x] += 1
-    
     fig2, ax2 = plt.subplots(figsize=(8, 6))
     sns.heatmap(heatmap_data, cmap="hot", cbar=True, xticklabels=False, yticklabels=False)
     ax2.set_title("Object Movement Heatmap")
