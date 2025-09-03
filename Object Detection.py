@@ -12,6 +12,7 @@ import queue
 import time
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode, get_twilio_ice_servers
 from scipy.optimize import linear_sum_assignment
+import torch
 
 # --- Environment Setup ---
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -35,7 +36,7 @@ class DetectEnabledState:
 def load_yolo_model(model_name):
     try:
         # Check for GPU availability
-        import torch
+        
         if torch.cuda.is_available():
             device = 'cuda'
             st.success("GPU is available and will be used for inference!")
@@ -327,4 +328,5 @@ ax1.set_ylabel("Distance (m)")
 ax1.legend()
 ax1.set_title("Simulated Laser Tracking with Kalman Filter")
 st.pyplot(fig1)
+
 
