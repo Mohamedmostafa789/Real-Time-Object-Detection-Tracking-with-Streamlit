@@ -30,13 +30,11 @@ class DetectEnabledState:
         self.value = value
         self.lock = threading.Lock()
 
-# --- Model Loading (Cached) ---
-# Updated @st.cache_resource function
+# --- Model Loading (Cached and Device Set) ---
 @st.cache_resource
 def load_yolo_model(model_name):
+    """Loads a YOLO model and sets it to the GPU if available."""
     try:
-        # Check for GPU availability
-        
         if torch.cuda.is_available():
             device = 'cuda'
             st.success("GPU is available and will be used for inference!")
@@ -45,22 +43,19 @@ def load_yolo_model(model_name):
             st.warning("No GPU detected. Falling back to CPU, which may be slow.")
         
         yolo_model = YOLO(model_name)
-        # Set the device for the model
-        yolo_model.to(device) 
+        yolo_model.to(device)
         
-        return yolo_model, yolo_model.names
+        # Ensure the model is ready by doing a dummy run
+        dummy_image = np.zeros((640, 640, 3), dtype=np.uint8)
+        yolo_model(dummy_image, verbose=False)
+        
+        return yolo_model, yolo_model.names, device
     except Exception as e:
         st.error(f"Could not load YOLO model {model_name}: {e}")
-        return None, []
+        return None, [], 'cpu'
 
-# In the main part of your code, you can also add this line for good measure
-if st.session_state.yolo_model:
-    if torch.cuda.is_available():
-        st.session_state.yolo_model.to('cuda')
 # --- Object Tracking with Kalman Filter ---
 class ObjectTracker:
-    # (The ObjectTracker class remains the same as in the previous professional code)
-    # I've omitted it here for brevity, but you should copy it directly
     def __init__(self):
         self.tracks = {}
         self.next_id = 0
@@ -77,8 +72,7 @@ class ObjectTracker:
         return kf
 
     def track_and_update(self, new_detections):
-        # ... (rest of the tracking logic)
-        # This part of the code is unchanged from the previous answer
+        # The rest of the tracking logic is unchanged
         if not new_detections and not self.tracks:
             return self.tracks
 
@@ -148,7 +142,7 @@ class ObjectTracker:
         x, y, _, _ = state
         return [int(x - 25), int(y - 25), int(x + 25), int(y + 25)]
 
-# --- The Worker Thread (Optimized) ---
+# --- The Worker Thread ---
 def detection_worker(detection_results, frame_queue, detect_enabled_state, yolo_model_ref):
     yolo_model = yolo_model_ref[0]
     yolo_names = yolo_model_ref[1]
@@ -165,41 +159,47 @@ def detection_worker(detection_results, frame_queue, detect_enabled_state, yolo_
                 detection_results.boxes = []
                 continue
 
-        if yolo_model:
-            results = yolo_model(frame, verbose=False)
-            new_boxes = []
-            for result in results:
-                for box in result.boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    conf = box.conf[0].item()
-                    cls = int(box.cls[0].item())
-                    label = f"{yolo_names[cls]} ({conf:.2f})"
-                    new_boxes.append({
-                        'coords': (x1, y1, x2, y2),
-                        'label': label,
-                        'pos': ((x1 + x2) // 2, (y1 + y2) // 2),
-                        'conf': conf
-                    })
-            
-            latency = (time.time() - start_time) * 1000  # Latency in milliseconds
-            with detection_results.lock:
-                detection_results.boxes = new_boxes
-                detection_results.latency = latency
+        # The model is now guaranteed to be on the correct device
+        results = yolo_model(frame, verbose=False)
+        new_boxes = []
+        for result in results:
+            for box in result.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                conf = box.conf[0].item()
+                cls = int(box.cls[0].item())
+                label = f"{yolo_names[cls]} ({conf:.2f})"
+                new_boxes.append({
+                    'coords': (x1, y1, x2, y2),
+                    'label': label,
+                    'pos': ((x1 + x2) // 2, (y1 + y2) // 2),
+                    'conf': conf
+                })
+        
+        latency = (time.time() - start_time) * 1000
+        with detection_results.lock:
+            detection_results.boxes = new_boxes
+            detection_results.latency = latency
 
 # --- Video Processor Class ---
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.object_tracker = ObjectTracker()
+        self.heatmap_positions = []
+        self.original_width = None
+        self.original_height = None
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
         
-        # PRO-TIP: Resize the frame before sending it to the model to reduce latency
-        # This is the single biggest performance improvement you can make on a CPU
-        resized_image = cv2.resize(image, (640, 480)) # Example resize, you can customize
+        if self.original_width is None:
+            self.original_width = image.shape[1]
+            self.original_height = image.shape[0]
+
+        # Use a consistent and smaller input size for the model
+        model_size = 640
+        resized_image = cv2.resize(image, (model_size, model_size))
 
         try:
-            # We also pass the timestamp to calculate latency
             frame_queue.put_nowait((resized_image.copy(), time.time()))
         except queue.Full:
             pass
@@ -209,21 +209,33 @@ class VideoProcessor(VideoProcessorBase):
             latency = detection_results.latency
 
         tracked_objects = self.object_tracker.track_and_update(latest_detections)
-
-        # Draw the latency on the frame
-        cv2.putText(image, f"Latency: {latency:.2f} ms", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
         
-        # Drawing phase (rest of the code is the same)
+        # Scale back the bounding box coordinates for drawing on the original frame
+        x_scale = self.original_width / model_size
+        y_scale = self.original_height / model_size
+
+        # Draw latency information
+        cv2.putText(image, f"Detection Latency: {latency:.2f} ms", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+        
         for track_id, track in tracked_objects.items():
             x1, y1, x2, y2 = track['bbox_true']
             label = track['label']
+            
+            # Scale coordinates back up for drawing
+            x1 = int(x1 * x_scale)
+            y1 = int(y1 * y_scale)
+            x2 = int(x2 * x_scale)
+            y2 = int(y2 * y_scale)
             
             color = tuple(int(c) for c in (sns.color_palette("husl", 10)[track_id % 10] * 255))
             
             cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
             cv2.putText(image, f"ID {track['id']}: {label}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             
-            heatmap_positions.append(track['pos'])
+            # Collect heatmap positions (scaled back to original dimensions)
+            pos_x = (x1 + x2) // 2
+            pos_y = (y1 + y2) // 2
+            self.heatmap_positions.append((pos_x, pos_y))
 
         return av.VideoFrame.from_ndarray(image, format="bgr24")
 
@@ -237,8 +249,8 @@ model_selection = st.radio(
     help="Larger models are more accurate but run slower."
 )
 
-if 'yolo_model' not in st.session_state or st.session_state.yolo_model_name != model_selection:
-    st.session_state.yolo_model, st.session_state.yolo_names = load_yolo_model(model_selection)
+if "yolo_model" not in st.session_state or st.session_state.yolo_model_name != model_selection:
+    st.session_state.yolo_model, st.session_state.yolo_names, st.session_state.device = load_yolo_model(model_selection)
     st.session_state.yolo_model_name = model_selection
 
 if not st.session_state.yolo_model:
@@ -248,9 +260,11 @@ detect_enabled_state = DetectEnabledState(True)
 detection_results = DetectionResults()
 frame_queue = queue.Queue(maxsize=1)
 
+# Pass the model reference to the worker thread
 detection_thread = threading.Thread(
     target=detection_worker,
-    args=(detection_results, frame_queue, detect_enabled_state, (st.session_state.yolo_model, st.session_state.yolo_names)),
+    args=(detection_results, frame_queue, detect_enabled_state, 
+          (st.session_state.yolo_model, st.session_state.yolo_names)),
     daemon=True
 )
 if not detection_thread.is_alive():
@@ -270,7 +284,7 @@ except Exception as e:
     twilio_ice_servers = []
 
 ctx = webrtc_streamer(
-    key="live_detection_pro_v2",
+    key="live_detection_pro_v3",
     mode=WebRtcMode.SENDRECV,
     video_processor_factory=VideoProcessor,
     media_stream_constraints={"video": True, "audio": False},
@@ -278,24 +292,27 @@ ctx = webrtc_streamer(
     async_processing=True
 )
 
-heatmap_positions = []
-
 st.title("Heatmap of Object Movement")
 st.markdown("This heatmap shows the accumulated path of tracked objects.")
 if ctx.state.playing:
     st.info("The heatmap will be generated after the video stream is stopped.")
 else:
-    if heatmap_positions:
-        heatmap_size = (480, 640)
-        heatmap_data = np.zeros(heatmap_size)
-        for x, y in heatmap_positions:
-            if 0 <= y < heatmap_size[0] and 0 <= x < heatmap_size[1]:
-                heatmap_data[y, x] += 1
-        
-        fig2, ax2 = plt.subplots(figsize=(8, 6))
-        sns.heatmap(heatmap_data, cmap="hot", cbar=True, xticklabels=False, yticklabels=False)
-        ax2.set_title("Object Movement Heatmap")
-        st.pyplot(fig2)
+    if "heatmap_positions" in st.session_state and st.session_state.heatmap_positions:
+        # Get dimensions from a placeholder image, or the first frame's original size
+        # A more robust way would be to pass dimensions from the processor
+        try:
+            heatmap_size = (480, 640)
+            heatmap_data = np.zeros(heatmap_size)
+            for x, y in st.session_state.heatmap_positions:
+                if 0 <= y < heatmap_size[0] and 0 <= x < heatmap_size[1]:
+                    heatmap_data[y, x] += 1
+            
+            fig2, ax2 = plt.subplots(figsize=(8, 6))
+            sns.heatmap(heatmap_data, cmap="hot", cbar=True, xticklabels=False, yticklabels=False)
+            ax2.set_title("Object Movement Heatmap")
+            st.pyplot(fig2)
+        except Exception as e:
+            st.error(f"Could not generate heatmap: {e}")
     else:
         st.info("Start the video stream to generate a heatmap.")
 
@@ -328,5 +345,3 @@ ax1.set_ylabel("Distance (m)")
 ax1.legend()
 ax1.set_title("Simulated Laser Tracking with Kalman Filter")
 st.pyplot(fig1)
-
-
